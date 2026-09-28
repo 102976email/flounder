@@ -122,6 +122,14 @@ const SKIP_DIRS = new Set([
   "venv",
   ".tox",
 ]);
+// Foundry's project layout: lib/ holds third-party dependencies (forge-std,
+// OpenZeppelin, solady, …) — the counterpart of node_modules/vendor/target — and
+// out/ + cache/ hold compiled artifacts and the incremental build cache. None of
+// it is first-party source, so keep it out of the corpus. lib/cache/out must
+// still be copied into the sandbox workspace (see security/sandbox.ts) so forge
+// build/test can resolve remappings and reuse its cache. Gated on foundry.toml
+// because these are ordinary source directory names in other project types.
+const FOUNDRY_SKIP_DIRS = new Set([...SKIP_DIRS, "lib", "out", "cache"]);
 
 export interface LoadDocsOptions {
   /** Root that will become the sandbox workspace root. Source document paths
@@ -165,9 +173,18 @@ async function walk(paths: string[], exts: Set<string>, kind: Doc["kind"], publi
   const docs: Doc[] = [];
   const cwd = path.resolve(publicRoot ?? process.cwd());
   for (const root of await buildWalkRoots(paths, cwd)) {
-    await walkOne(root.full, exts, kind, docs, root);
+    const skipDirs = root.isDirectory && (await isFoundryProject(root.full)) ? FOUNDRY_SKIP_DIRS : SKIP_DIRS;
+    await walkOne(root.full, exts, kind, docs, root, skipDirs);
   }
   return docs;
+}
+
+async function isFoundryProject(dir: string): Promise<boolean> {
+  try {
+    return (await stat(path.join(dir, "foundry.toml"))).isFile();
+  } catch {
+    return false;
+  }
 }
 
 interface WalkRoot {
@@ -216,7 +233,7 @@ async function isDirectoryPath(fullPath: string): Promise<boolean> {
   }
 }
 
-async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], out: Doc[], root: WalkRoot): Promise<void> {
+async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], out: Doc[], root: WalkRoot, skipDirs: Set<string>): Promise<void> {
   let info;
   try {
     info = await lstat(fullPath);
@@ -229,8 +246,8 @@ async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], o
     const entries = await readdir(fullPath, { withFileTypes: true });
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
-      await walkOne(path.join(fullPath, entry.name), exts, kind, out, root);
+      if (entry.isDirectory() && skipDirs.has(entry.name)) continue;
+      await walkOne(path.join(fullPath, entry.name), exts, kind, out, root, skipDirs);
     }
     return;
   }
